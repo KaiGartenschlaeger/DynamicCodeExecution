@@ -1,9 +1,11 @@
-﻿using System;
-using System.IO;
-using System.Linq;
-using Microsoft.CodeAnalysis;
+﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.Text;
+using System;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Runtime.Loader;
 
 namespace DynamicCodeExecution
 {
@@ -32,8 +34,41 @@ namespace DynamicCodeExecution
                     assemblyIdentityComparer: DesktopAssemblyIdentityComparer.Default));
         }
 
-        static void Main(string[] args)
+        internal class SimpleUnloadableAssemblyLoadContext : AssemblyLoadContext
         {
+            public SimpleUnloadableAssemblyLoadContext()
+                : base(true)
+            {
+            }
+
+            protected override Assembly Load(AssemblyName assemblyName)
+            {
+                return null;
+            }
+        }
+
+        private static WeakReference LoadAndExecute(byte[] compiledAssembly, string[] args)
+        {
+            using (var asm = new MemoryStream(compiledAssembly))
+            {
+                var assemblyLoadContext = new SimpleUnloadableAssemblyLoadContext();
+                var assembly = assemblyLoadContext.LoadFromStream(asm);
+
+                var entry = assembly.EntryPoint;
+
+                _ = entry != null && entry.GetParameters().Length > 0
+                    ? entry.Invoke(null, new object[] { args })
+                    : entry.Invoke(null, null);
+
+                assemblyLoadContext.Unload();
+
+                return new WeakReference(assemblyLoadContext);
+            }
+        }
+
+        static void Main()
+        {
+            byte[] compiledAssembly;
             using (var peStream = new MemoryStream())
             {
                 var sourceCode = File.ReadAllText("Test.cs");
@@ -50,14 +85,24 @@ namespace DynamicCodeExecution
                         Console.Error.WriteLine("{0}: {1}", diagnostic.Id, diagnostic.GetMessage());
                     }
 
-                    //return null;
+                    compiledAssembly = null;
                 }
-
-                Console.WriteLine("Compilation done without any error.");
-                peStream.Seek(0, SeekOrigin.Begin);
-
-                //return peStream.ToArray();
+                else
+                {
+                    Console.WriteLine("Compilation done without any error.");
+                    peStream.Seek(0, SeekOrigin.Begin);
+                    compiledAssembly = peStream.ToArray();
+                }
             }
+
+            var assemblyLoadContextWeakRef = LoadAndExecute(compiledAssembly, new[] { "Test 1", "Test 2" });
+            for (var i = 0; i < 8 && assemblyLoadContextWeakRef.IsAlive; i++)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            }
+
+            Console.WriteLine(assemblyLoadContextWeakRef.IsAlive ? "Unloading failed!" : "Unloading success!");
         }
     }
 }
